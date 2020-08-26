@@ -4,7 +4,6 @@
 
 package io.flutter.plugins.firebase.storage;
 
-import android.content.Context;
 import android.net.Uri;
 import android.util.SparseArray;
 import android.webkit.MimeTypeMap;
@@ -16,53 +15,39 @@ import com.google.android.gms.tasks.Task;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.storage.FileDownloadTask;
 import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.ListResult;
 import com.google.firebase.storage.OnPausedListener;
 import com.google.firebase.storage.OnProgressListener;
 import com.google.firebase.storage.StorageException;
 import com.google.firebase.storage.StorageMetadata;
 import com.google.firebase.storage.StorageReference;
 import com.google.firebase.storage.UploadTask;
-import io.flutter.embedding.engine.plugins.FlutterPlugin;
-import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
-import io.flutter.plugin.common.PluginRegistry;
+import io.flutter.plugin.common.PluginRegistry.Registrar;
 import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
 
-// TODO(kroikie): Better handle empty paths.
-//                https://github.com/FirebaseExtended/flutterfire/issues/1505
 /** FirebaseStoragePlugin */
-public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
+public class FirebaseStoragePlugin implements MethodCallHandler {
   private FirebaseStorage firebaseStorage;
-  private MethodChannel methodChannel;
+  private final MethodChannel channel;
 
   private int nextUploadHandle = 0;
   private final SparseArray<UploadTask> uploadTasks = new SparseArray<>();
 
-  public static void registerWith(PluginRegistry.Registrar registrar) {
-    FirebaseStoragePlugin instance = new FirebaseStoragePlugin();
-    instance.onAttachedToEngine(registrar.context(), registrar.messenger());
+  public static void registerWith(Registrar registrar) {
+    final MethodChannel channel =
+        new MethodChannel(registrar.messenger(), "plugins.flutter.io/firebase_storage");
+    channel.setMethodCallHandler(new FirebaseStoragePlugin(channel, registrar));
   }
 
-  private void onAttachedToEngine(Context applicationContext, BinaryMessenger binaryMessenger) {
-    FirebaseApp.initializeApp(applicationContext);
-    methodChannel = new MethodChannel(binaryMessenger, "plugins.flutter.io/firebase_storage");
-    methodChannel.setMethodCallHandler(this);
-  }
-
-  @Override
-  public void onAttachedToEngine(FlutterPluginBinding binding) {
-    onAttachedToEngine(binding.getApplicationContext(), binding.getBinaryMessenger());
-  }
-
-  @Override
-  public void onDetachedFromEngine(FlutterPluginBinding binding) {
-    firebaseStorage = null;
-    methodChannel = null;
+  private FirebaseStoragePlugin(MethodChannel channel, Registrar registrar) {
+    this.channel = channel;
+    FirebaseApp.initializeApp(registrar.context());
   }
 
   @Override
@@ -143,6 +128,9 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
       case "UploadTask#cancel":
         cancelUploadTask(call, result);
         break;
+      case "StorageReference#listAll":
+        listAll(call, result);
+        break;
       default:
         result.notImplemented();
         break;
@@ -174,11 +162,8 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
   }
 
   private void getMetadata(MethodCall call, final Result result) {
-    StorageReference ref = firebaseStorage.getReference();
     String path = call.argument("path");
-    if (!path.isEmpty()) {
-      ref = ref.child(path);
-    }
+    StorageReference ref = firebaseStorage.getReference().child(path);
     ref.getMetadata()
         .addOnSuccessListener(
             new OnSuccessListener<StorageMetadata>() {
@@ -197,12 +182,9 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
   }
 
   private void updateMetadata(MethodCall call, final Result result) {
-    StorageReference ref = firebaseStorage.getReference();
     String path = call.argument("path");
-    if (!path.isEmpty()) {
-      ref = ref.child(path);
-    }
     Map<String, Object> metadata = call.argument("metadata");
+    StorageReference ref = firebaseStorage.getReference().child(path);
     ref.updateMetadata(buildMetadataFromMap(metadata))
         .addOnSuccessListener(
             new OnSuccessListener<StorageMetadata>() {
@@ -221,13 +203,8 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
   }
 
   private void getBucket(MethodCall call, final Result result) {
-    StorageReference ref = firebaseStorage.getReference();
-
     String path = call.argument("path");
-    if (!path.isEmpty()) {
-      ref = ref.child(path);
-    }
-
+    StorageReference ref = firebaseStorage.getReference().child(path);
     result.success(ref.getBucket());
   }
 
@@ -310,6 +287,51 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
     }
     final int handle = addUploadListeners(uploadTask);
     result.success(handle);
+  }
+
+  private void listAll(MethodCall call, final Result result) {
+    String path = call.argument("path");
+    StorageReference ref = firebaseStorage.getReference().child(path);
+    final Task<ListResult> listTask = ref.listAll();
+    listTask.addOnSuccessListener(
+        new OnSuccessListener<ListResult>() {
+          @Override
+          public void onSuccess(ListResult listResult) {
+            Map<String, Object> map = new HashMap<>();
+            map.put("pageToken", listResult.getPageToken());
+            Map<String, Object> mapItems = new HashMap<>();
+            for (int i = 0; i < listResult.getItems().size(); i++) {
+              mapItems.put(
+                  listResult.getItems().get(i).getName(),
+                  buildMapStorageReference(listResult.getItems().get(i)));
+            }
+            map.put("items", mapItems);
+            Map<String, Object> mapPrefixes = new HashMap<>();
+            for (int i = 0; i < listResult.getPrefixes().size(); i++) {
+              mapPrefixes.put(
+                  listResult.getPrefixes().get(i).getName(),
+                  buildMapStorageReference(listResult.getPrefixes().get(i)));
+            }
+            map.put("prefixes", mapPrefixes);
+            result.success(map);
+          }
+        });
+    listTask.addOnFailureListener(
+        new OnFailureListener() {
+          @Override
+          public void onFailure(@NonNull Exception e) {
+            result.error("listing_error", e.getMessage(), null);
+          }
+        });
+  }
+
+  private Map<String, Object> buildMapStorageReference(StorageReference storageReference) {
+    Map<String, Object> map = new HashMap<>();
+    map.put("name", storageReference.getName());
+    map.put("bucket", storageReference.getBucket());
+    map.put("path", storageReference.getPath());
+    map.put("creationTimeMillis", storageReference.get)
+    return map;
   }
 
   private StorageMetadata buildMetadataFromMap(Map<String, Object> map) {
@@ -482,8 +504,7 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
       StorageTaskEventType type,
       UploadTask.TaskSnapshot snapshot,
       StorageException error) {
-    methodChannel.invokeMethod(
-        "StorageTaskEvent", buildMapFromTaskEvent(handle, type, snapshot, error));
+    channel.invokeMethod("StorageTaskEvent", buildMapFromTaskEvent(handle, type, snapshot, error));
   }
 
   private Map<String, Object> buildMapFromTaskEvent(
@@ -519,11 +540,9 @@ public class FirebaseStoragePlugin implements MethodCallHandler, FlutterPlugin {
     if (metadata == null) {
       metadata = new HashMap<>();
     }
-
     if (metadata.get("contentType") == null) {
       metadata.put("contentType", getMimeType(file));
     }
-
     return metadata;
   }
 
